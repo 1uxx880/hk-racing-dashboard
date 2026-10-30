@@ -56,17 +56,14 @@ if page_mode == "📊 賽日官方排位表 (真實抓取)":
     
     col1, col2 = st.columns([2, 2])
     with col1:
-        # 預設抓取最近的賽馬日或當前日期
         selected_date = st.date_input("選擇賽事日期", datetime.date.today())
     with col2:
         venue_choice = st.selectbox("賽馬場地", ["沙田 (ST)", "跑馬地 (HV)"])
 
     st.markdown("---")
 
-    # 嘗試直接從 HKJC 官方網頁讀取真實排位表表格
     with st.spinner("正在向香港賽馬會提取排位表資料..."):
         try:
-            # HKJC 排位表標準公開網址
             url = "https://racing.hkjc.com/racing/info/racing/chinese/racinginfo/RaceCard.aspx"
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -75,31 +72,31 @@ if page_mode == "📊 賽日官方排位表 (真實抓取)":
             res = requests.get(url, headers=headers, timeout=8)
             
             if res.status_code == 200:
-                # 使用 pandas 自動提取網頁內的所有表格
                 dfs = pd.read_html(res.text)
                 
                 if dfs and len(dfs) > 0:
                     st.success("成功取得 HKJC 官方排位表真實數據！")
-                    
-                    # 讓使用者選擇場次（若網頁包含多個表格對應不同場次）
                     race_options = [f"第 {i+1} 場" for i in range(len(dfs))]
                     selected_race_idx = st.selectbox("選擇賽事場次", race_options)
                     
-                    # 取得對應場次的表格
                     idx = int(selected_race_idx.replace("第 ", "").replace(" 場", "")) - 1
                     target_df = dfs[idx]
                     
-                    # 顯示清理後的排位表
                     st.dataframe(target_df, use_container_width=True)
                 else:
                     st.warning("⚠️ 目前該頁面結構中找不到排位表表格。可能當日並非賽馬日，或官方尚未公佈排位。")
             else:
                 st.error(f"無法連線至賽馬會伺服器 (狀態碼: {res.status_code})")
         except Exception as e:
-            st.warning(f"目前未能讀取即時排位數據：非賽馬日或網路連線受限。")
-            st.info("💡 提示：在非賽馬日期間，您可以切換至下方的「預先報名表」或使用「私人晨操筆記」記錄心水資料。")
+            st.warning("目前未能讀取即時排位數據：非賽馬日或網路連線受限。")
+            st.info("💡 提示：在非賽馬日期間，您可以切換至下方的「預先報名表」或使用「私人筆記」記錄心水資料。")
 
 # --- 模組二：預先報名表 ---
 elif page_mode == "📝 預先報名表 (Entries)":
     st.subheader("📋 賽事預先報名表 (Entries)")
-    st.caption("直接提取 HK
+    st.caption("直接提取 HKJC 最新公佈之出賽候選馬匹、評分與優先權資料")
+
+    try:
+        url = "https://racing.hkjc.com/racing/info/racing/chinese/racinginfo/Entries.aspx"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get
