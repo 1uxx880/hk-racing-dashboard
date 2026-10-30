@@ -99,4 +99,4 @@ elif page_mode == "📝 預先報名表 (Entries)":
     try:
         url = "https://racing.hkjc.com/racing/info/racing/chinese/racinginfo/Entries.aspx"
         headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get
+        res = requests.get(url,
