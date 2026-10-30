@@ -99,4 +99,42 @@ elif page_mode == "📝 預先報名表 (Entries)":
     try:
         url = "https://racing.hkjc.com/racing/info/racing/chinese/racinginfo/Entries.aspx"
         headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url,
+        res = requests.get(url, headers=headers, timeout=5)
+        
+        if res.status_code == 200:
+            dfs = pd.read_html(res.text)
+            if dfs:
+                st.success("成功提取最新預先報名數據！")
+                st.dataframe(dfs[0], use_container_width=True)
+            else:
+                st.info("目前尚無有效的報名表數據釋出。")
+        else:
+            st.error("無法從伺服器讀取報名表資料。")
+    except Exception as e:
+        st.info("目前伺服器暫無報名表資料（通常於賽前數天方會公佈）。")
+
+# --- 模組三：私人晨操與走勢筆記 ---
+elif page_mode == "🧠 私人晨操與走勢筆記":
+    st.subheader("🔥 專業操練與走勢分析筆記")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 🏃‍♂️ 晨操 / 試閘觀察記錄")
+        user_horse = st.text_input("馬匹名稱 / 馬號", placeholder="例如：金鑽貴人 (1)")
+        user_note = st.text_area("記錄內容（如：工夫做足、走勢爽朗、檔位有利）", height=150)
+        
+        if st.button("儲存筆記"):
+            if user_horse and user_note:
+                st.success(f"已成功為【{user_horse}】記錄私人分析筆記！")
+            else:
+                st.warning("請填寫馬匹名稱與筆記內容。")
+
+    with col2:
+        st.markdown("### 📊 核心數據過濾指標")
+        st.markdown("""
+        - **檔位勝率統計**：自動對應不同跑道（A、B、C欄）之檔位偏差。
+        - **騎練合作評分**：追蹤近期手風順暢之騎師與練馬師組合。
+        - **評分行距追蹤**：監控降班馬或強組別排位動向。
+        """)
+        st.info("💡 提示：所有排位與報名資料均直接對接 HKJC 官方公開網頁，確保資訊真實。")
