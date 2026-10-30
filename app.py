@@ -7,9 +7,9 @@ import datetime
 
 # 頁面基本設定
 st.set_page_config(
-    page_title=HKJC 賽馬智能儀表板,
-    page_icon=🐎,
-    layout=wide
+    page_title="HKJC 賽馬智能儀表板",
+    page_icon="🐎",
+    layout="wide"
 )
 
 st.title(🐎 香港賽馬會 (HKJC) 即時賽馬分析儀表板)
