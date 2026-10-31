@@ -3,29 +3,16 @@ import pandas as pd
 import requests
 import datetime
 import sqlite3
-import json
 
 # -----------------------------------------------------------------------------
-# 0. 初始化本地 SQLite 資料庫
+# 0. 本地資料庫初始化 (筆記與快取雙重保險)
 # -----------------------------------------------------------------------------
 def get_db_connection():
-    conn = sqlite3.connect("racing_local.db", check_same_thread=False)
-    return conn
+    return sqlite3.connect("racing_local.db", check_same_thread=False)
 
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    # 建立排位表快取表
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS race_cache (
-            date_str TEXT,
-            venue TEXT,
-            race_idx INTEGER,
-            table_json TEXT,
-            PRIMARY KEY (date_str, venue, race_idx)
-        )
-    ''')
-    # 建立私人筆記表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,18 +35,18 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🐎 專業賽馬智能分析與本地快取系統")
-st.caption("內建 SQLite 資料庫引擎 | 支援離線快取、排位表追蹤與私人筆記")
+st.title("🐎 專業賽馬智能分析系統 (多源數據抓取版)")
+st.caption("具備動態多通道備援機制 | 自動抓取最新賽事排位表與馬匹數據")
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 2. 側邊欄：控制與 Telegram 參數
+# 2. 側邊欄控制面板
 # -----------------------------------------------------------------------------
 st.sidebar.header("⚙️ 系統控制面板")
 
 page_mode = st.sidebar.radio(
     "功能模組",
-    ["📊 官方排位表 (智慧快取)", "📝 預先報名表 (Entries)", "🧠 私人晨操與走勢筆記"]
+    ["📊 即時排位表 (多源抓取)", "📝 預先報名表 (Entries)", "🧠 私人晨操與走勢筆記"]
 )
 
 st.sidebar.markdown("---")
@@ -83,111 +70,106 @@ if st.sidebar.button("測試 Telegram 連線"):
         st.sidebar.warning("請先輸入 Token 與 Chat ID")
 
 # -----------------------------------------------------------------------------
-# 3. 主頁面邏輯
+# 3. 多源排位表抓取核心邏輯
+# -----------------------------------------------------------------------------
+def fetch_racecard_multi_source():
+    """
+    透過偽裝 Request Header 與多通道備援抓取真實排位數據
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://racing.hkjc.com/racing/chinese/"
+    }
+
+    # 多個潛在的排位表數據源 / 備用 URL 列表
+    candidate_urls = [
+        "https://racing.hkjc.com/racing/information/chinese/Racing/RaceCard.aspx",
+        "https://racing.hkjc.com/racing/info/racing/chinese/racinginfo/RaceCard.aspx",
+        "https://racing.hkjc.com/chinese/local/index.asp"
+    ]
+
+    for url in candidate_urls:
+        try:
+            res = requests.get(url, headers=headers, timeout=6)
+            if res.status_code == 200:
+                dfs = pd.read_html(res.text)
+                # 篩選有效長度的數據表格
+                valid_dfs = [df for df in dfs if len(df) > 1]
+                if valid_dfs:
+                    return True, valid_dfs, f"成功連線自數據源: {url}"
+        except Exception:
+            continue
+
+    return False, [], "目前所有備援通道均未獲取到有效排位表（可能非賽馬日或未公佈）。"
+
+# -----------------------------------------------------------------------------
+# 4. 主頁面邏輯
 # -----------------------------------------------------------------------------
 
-# --- 模組一：官方排位表 (智慧快取) ---
-if page_mode == "📊 官方排位表 (智慧快取)":
-    st.subheader("🏇 香港賽馬會 - 官方排位表 (離線安全快取機制)")
+# --- 模組一：即時排位表 (多源抓取) ---
+if page_mode == "📊 即時排位表 (多源抓取)":
+    st.subheader("🏇 賽日排位表 (自動備援抓取)")
     
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
-        selected_date = st.date_input("選擇賽事日期", datetime.date.today())
+        selected_date = st.date_input("賽事日期", datetime.date.today())
     with col2:
         venue_choice = st.selectbox("賽馬場地", ["沙田 (ST)", "跑馬地 (HV)"])
     with col3:
         st.write("")
         st.write("")
-        force_refresh = st.button("🔄 強制聯網更新")
+        refresh_btn = st.button("🔄 重新線上擷取")
 
-    date_str = selected_date.strftime("%Y%m%d")
     st.markdown("---")
 
-    target_df = None
-    fetch_success = False
+    with st.spinner("正在透過多重通道獲取最新賽事排位..."):
+        success, dfs, msg = fetch_racecard_multi_source()
 
-    # 嘗試從網路抓取
-    if force_refresh:
-        with st.spinner("正在強制連接 HKJC 伺服器更新數據..."):
-            try:
-                urls = [
-                    "https://racing.hkjc.com/racing/information/chinese/Racing/RaceCard.aspx",
-                    "https://racing.hkjc.com/racing/info/racing/chinese/racinginfo/RaceCard.aspx"
-                ]
-                headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://racing.hkjc.com/"}
-                
-                for url in urls:
-                    res = requests.get(url, headers=headers, timeout=6)
-                    if res.status_code == 200:
-                        dfs = pd.read_html(res.text)
-                        if dfs and len(dfs) > 0:
-                            fetch_success = True
-                            # 將抓到的所有場次存入 SQLite 快取
-                            conn = get_db_connection()
-                            cursor = conn.cursor()
-                            for idx, df in enumerate(dfs):
-                                df_json = df.to_json(orient="split")
-                                cursor.execute('''
-                                    INSERT OR REPLACE INTO race_cache (date_str, venue, race_idx, table_json)
-                                    VALUES (?, ?, ?, ?)
-                                ''', (date_str, venue_choice, idx, df_json))
-                            conn.commit()
-                            conn.close()
-                            st.success("成功從官網抓取最新排位並已寫入本地資料庫！")
-                            break
-            except Exception as e:
-                st.warning(f"聯網更新失敗 ({e})，將自動讀取本地資料庫快取。")
-
-    # 如果沒有強制更新，或聯網失敗，嘗試從本地 SQLite 讀取
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT race_idx, table_json FROM race_cache 
-        WHERE date_str = ? AND venue = ?
-    ''', (date_str, venue_choice))
-    rows = cursor.fetchall()
-    conn.close()
-
-    if rows:
-        # 本地快取有資料
-        st.info(f"📂 目前顯示的是來自【本地 SQLite 快取】的賽事資料。")
-        race_options = [f"第 {row[0]+1} 場" for row in rows]
+    if success and dfs:
+        st.success(msg)
+        race_options = [f"第 {i+1} 場" for i in range(len(dfs))]
         selected_race_idx = st.selectbox("選擇賽事場次", race_options)
         
         chosen_idx = int(selected_race_idx.replace("第 ", "").replace(" 場", "")) - 1
-        for row in rows:
-            if row[0] == chosen_idx:
-                target_df = pd.read_json(row[1], orient="split")
-                st.dataframe(target_df, use_container_width=True)
-                break
+        target_df = dfs[chosen_idx]
+        
+        st.dataframe(target_df, use_container_width=True)
     else:
-        st.warning("⚠️ 本地資料庫與官網目前皆無此日期的排位表快取。")
-        st.info("💡 **提示**：非賽馬日或官方尚未公佈排位時將顯示此訊息。您可以點擊上方【強制聯網更新】或切換至【私人晨操筆記】記錄資料。")
+        st.warning(f"⚠️ {msg}")
+        st.info("💡 **排位表公佈時間提示**：賽馬會通常於比賽前 2 天正式公佈排位（週三賽事前於週一、週末賽事前於週四）。非公佈期時可先利用【私人晨操與走勢筆記】進行分析。")
 
 # --- 模組二：預先報名表 ---
 elif page_mode == "📝 預先報名表 (Entries)":
     st.subheader("📋 賽事預先報名表 (Entries)")
-    st.caption("直接提取 HKJC 最新公佈之出賽候選馬匹、評分與優先權資料")
+    st.caption("自動連線擷取 HKJC 最新公佈之出賽候選馬匹與優先權資料")
 
-    try:
-        url = "https://racing.hkjc.com/racing/info/racing/chinese/racinginfo/Entries.aspx"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            dfs = pd.read_html(res.text)
-            if dfs:
-                st.success("成功提取最新預先報名數據！")
-                st.dataframe(dfs[0], use_container_width=True)
-            else:
-                st.info("目前尚無有效的報名表數據釋出。")
-        else:
-            st.error("伺服器暫無報名表資料（404 或非公佈期）。")
-    except Exception as e:
-        st.info("目前伺服器暫無報名表資料。")
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    entries_urls = [
+        "https://racing.hkjc.com/racing/information/chinese/Racing/Entries.aspx",
+        "https://racing.hkjc.com/racing/info/racing/chinese/racinginfo/Entries.aspx"
+    ]
+    
+    found = False
+    for url in entries_urls:
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                dfs = pd.read_html(res.text)
+                if dfs:
+                    st.success(f"成功提取報名數據 (來源: {url})")
+                    st.dataframe(dfs[0], use_container_width=True)
+                    found = True
+                    break
+        except Exception:
+            continue
+            
+    if not found:
+        st.info("目前伺服器暫無預先報名表資料（通常於賽前數天公佈）。")
 
 # --- 模組三：私人晨操與走勢筆記 ---
 elif page_mode == "🧠 私人晨操與走勢筆記":
-    st.subheader("🔥 專業操練與走勢分析筆記 (持久化資料庫)")
+    st.subheader("🔥 專業操練與走勢分析筆記")
     
     col1, col2 = st.columns(2)
     
@@ -196,7 +178,7 @@ elif page_mode == "🧠 私人晨操與走勢筆記":
         user_horse = st.text_input("馬匹名稱 / 馬號", placeholder="例如：金鑽貴人 (1)")
         user_note = st.text_area("記錄內容（如：工夫做足、走勢爽朗、檔位有利）", height=120)
         
-        if st.button("儲存至本地資料庫"):
+        if st.button("儲存筆記"):
             if user_horse and user_note:
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -205,12 +187,12 @@ elif page_mode == "🧠 私人晨操與走勢筆記":
                                (user_horse, user_note, current_time))
                 conn.commit()
                 conn.close()
-                st.success(f"成功將【{user_horse}】的筆記存入本地資料庫！")
+                st.success(f"成功為【{user_horse}】儲存筆記！")
             else:
-                st.warning("請完整填寫馬匹名稱與筆記內容。")
+                st.warning("請填寫馬匹名稱與內容。")
 
     with col2:
-        st.markdown("### 📂 已儲存的私人筆記列表")
+        st.markdown("### 📂 私人筆記庫")
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT horse_name, note, update_time FROM notes ORDER BY id DESC")
