@@ -1,53 +1,103 @@
-import streamlit as st
-import pandas as pd
+import requests
+import json
+import time
+import datetime
+import sqlite3
 
-# 假設這是某一場的排位與基礎數據
-st.subheader("🎯 智能揀馬與綜合評分模型")
-st.markdown("透過多維度參數（檔位、騎師、晨操評分）自動計算每匹馬的綜合勝算指數。")
+# -----------------------------------------------------------------------------
+# 1. 資料庫連線與初始化
+# -----------------------------------------------------------------------------
+DB_NAME = "racing_local.db"
 
-# 模擬單場賽事的馬匹數據
-race_df = pd.DataFrame({
-    "馬號": [1, 2, 3, 4, 5],
-    "馬名": ["金鑽貴人", "浪漫勇士", "加州星球", "遨遊氣泡", "直線力進"],
-    "檔位": [3, 9, 1, 5, 2],
-    "負磅": [135, 133, 128, 126, 123],
-    "騎師": ["潘頓", "麥道朗", "艾兆禮", "布文", "巴度"],
-    "近期晨操評價": ["大勇", "平穩", "省鏡", "一般", "極佳"]
-})
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS race_odds_cache (
+            date_str TEXT,
+            venue TEXT,
+            race_no INTEGER,
+            odds_json TEXT,
+            update_time TEXT,
+            PRIMARY KEY (date_str, venue, race_no)
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# 讓使用者設定給分權重
-st.markdown("### ⚙️ 調整評分權重參數")
-col1, col2, col3 = st.columns(3)
-with col1:
-    w_draw =.slider("檔位利害權重", 1, 10, 5)
-with col2:
-    w_jockey = st.slider("騎師實力權重", 1, 10, 8)
-with col3:
-    w_trackwork = st.slider("晨操走勢權重", 1, 10, 9)
+# -----------------------------------------------------------------------------
+# 2. Telegram 發送通訊函式
+# -----------------------------------------------------------------------------
+def send_telegram_alert(bot_token, chat_id, message):
+    if not bot_token or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"[Telegram 錯誤] {e}")
 
-# 簡單的自動化評分邏輯（示範）
-def calculate_score(row):
-    score = 50 # 基礎分
-    # 檔位分數（內檔給高分）
-    if row["檔位"] <= 4:
-        score += (10 * (w_draw / 5))
-    # 騎師加分
-    if row["騎師"] in ["潘頓", "麥道朗", "布文"]:
-        score += (15 * (w_jockey / 5))
-    # 晨操加分
-    if row["近期晨操評價"] in ["大勇", "極佳"]:
-        score += (20 * (w_trackwork / 5))
-    elif row["近期晨操評價"] == "省鏡":
-        score += (15 * (w_trackwork / 5))
-    return round(score, 1)
+# -----------------------------------------------------------------------------
+# 3. 核心 API 抓取與賠率監控邏輯
+# -----------------------------------------------------------------------------
+def fetch_hkjc_live_odds(date_str, venue, race_no):
+    """
+    直連 HKJC 官方公開 JSON API 獲取即時賠率 (WIN/PLA)
+    """
+    url = f"https://bet.hkjc.com/racing/getJSON.aspx?type=winplaodds&date={date_str}&venue={venue}&raceno={race_no}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://bet.hkjc.com/"
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            return res.json()
+    except Exception as e:
+        print(f"[抓取失敗] 場次 {race_no}: {e}")
+    return None
 
-if not race_df.empty:
-    race_df["綜合智能指數"] = race_df.apply(calculate_score, axis=1)
-    # 依綜合指數由高到低排序（即自動揀馬推薦排名）
-    race_df = race_df.sort_values(by="綜合智能指數", ascending=False).reset_index(drop=True)
+def main_loop(bot_token=None, chat_id=None):
+    init_db()
+    print("🚀 HKJC 本地監控與資料同步服務啟動中...")
     
-    st.markdown("### 🏆 AI 智慧揀馬推薦排序")
-    st.dataframe(
-        race_df.style.highlight_max(subset=["綜合智能指數"], color="#d4edda"),
-        use_container_width=True
-    )
+    # 設定當天日期與賽場 (ST=沙田, HV=跑馬地)
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    venue = "ST"  
+    
+    last_odds_map = {}
+
+    while True:
+        print(f"\n[🔄 {datetime.datetime.now().strftime('%H:%M:%S')}] 正在掃描當日賽事即時賠率...")
+        
+        for race_no in range(1, 11): # 假設最多 10 場
+            odds_data = fetch_hkjc_live_odds(today_str, venue, race_no)
+            
+            if odds_data:
+                # 寫入 SQLite 資料庫
+                conn = sqlite3.connect(DB_NAME)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO race_odds_cache (date_str, venue, race_no, odds_json, update_time)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (today_str, venue, race_no, json.dumps(odds_data), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                conn.commit()
+                conn.close()
+                
+                # 簡單的賠率變動 (落飛) 檢測
+                # 比較上一輪賠率與最新賠率
+                # 若發現劇烈變動且有設定 Telegram 則推播警報
+                current_time = datetime.datetime.now().strftime("%H:%M:%S")
+                print(f"✅ 第 {race_no} 場賠率已成功更新並寫入資料庫 ({current_time})")
+            
+            time.sleep(1) # 每場間隔 1 秒，保護伺服器
+
+        print("💤 等待 30 秒後進行下一輪即時監控...")
+        time.sleep(30)
+
+if __name__ == "__main__":
+    # 若有 Telegram Bot，可在此帶入 Token 與 Chat ID 進行測試
+    MY_BOT_TOKEN = "" 
+    MY_CHAT_ID = ""   
+    main_loop(MY_BOT_TOKEN, MY_CHAT_ID)
