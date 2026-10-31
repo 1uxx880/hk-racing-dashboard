@@ -1,29 +1,19 @@
 import streamlit as st
 import pandas as pd
+import requests
 import datetime
 import sqlite3
+import json
 
 # -----------------------------------------------------------------------------
-# 0. 初始化本地 SQLite 資料庫
+# 0. 初始化本地 SQLite 資料庫（用於儲存筆記與 API 快取）
 # -----------------------------------------------------------------------------
 def get_db_connection():
-    conn = sqlite3.connect("racing_local.db", check_same_thread=False)
-    return conn
+    return sqlite3.connect("racing_local.db", check_same_thread=False)
 
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    # 建立排位表快取表
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS race_cache (
-            date_str TEXT,
-            venue TEXT,
-            race_idx INTEGER,
-            table_json TEXT,
-            PRIMARY KEY (date_str, venue, race_idx)
-        )
-    ''')
-    # 建立私人筆記表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,8 +36,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🐎 專業賽馬智能分析與數據管理系統")
-st.caption("內建 SQLite 資料庫引擎 | 支援檔案上傳、排位表管理與私人分析筆記")
+st.title("🐎 專業賽馬智能分析系統 (官方 JSON API 版)")
+st.caption("直接對接香港賽馬會官方 API 接口 | 支援即時賠率查詢與私人筆記")
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
@@ -57,7 +47,7 @@ st.sidebar.header("⚙️ 系統控制面板")
 
 page_mode = st.sidebar.radio(
     "功能模組",
-    ["📊 賽事排位表 (本地資料庫)", "📤 上傳最新排位數據", "🧠 私人晨操與走勢筆記"]
+    ["📊 官方即時賠率 API 查詢", "🧠 私人晨操與走勢筆記"]
 )
 
 st.sidebar.markdown("---")
@@ -68,7 +58,6 @@ tg_chat_id = st.sidebar.text_input("Chat ID", key="tg_chat")
 if st.sidebar.button("測試 Telegram 連線"):
     if tg_token and tg_chat_id:
         try:
-            import requests
             url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
             payload = {"chat_id": tg_chat_id, "text": "🐎 賽馬分析系統連線測試成功！"}
             res = requests.post(url, json=payload, timeout=5)
@@ -82,90 +71,81 @@ if st.sidebar.button("測試 Telegram 連線"):
         st.sidebar.warning("請先輸入 Token 與 Chat ID")
 
 # -----------------------------------------------------------------------------
-# 3. 主頁面邏輯
+# 3. 核心 API 請求函式
+# -----------------------------------------------------------------------------
+def fetch_hkjc_json_odds(date_str, venue, race_no):
+    """
+    透過官方 JSON 接口獲取即時賠率 (WIN/PLA)
+    url 格式: https://bet.hkjc.com/racing/getJSON.aspx?type=winplaodds&date=YYYY-MM-DD&venue=ST&raceno=1
+    """
+    url = f"https://bet.hkjc.com/racing/getJSON.aspx"
+    params = {
+        "type": "winplaodds",
+        "date": date_str,
+        "venue": venue,
+        "raceno": race_no
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://bet.hkjc.com/",
+        "Accept": "application/json, text/javascript, */*; q=0.01"
+    }
+    
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=6)
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            return False, f"伺服器返回狀態碼: {response.status_code}"
+    except Exception as e:
+        return False, str(e)
+
+# -----------------------------------------------------------------------------
+# 4. 主頁面邏輯
 # -----------------------------------------------------------------------------
 
-# --- 模組一：賽事排位表 (本地資料庫檢視) ---
-if page_mode == "📊 賽事排位表 (本地資料庫)":
-    st.subheader("🏇 賽事排位與數據檢視")
+# --- 模組一：官方即時賠率 API 查詢 ---
+if page_mode == "📊 官方即時賠率 API 查詢":
+    st.subheader("📡 香港賽馬會 - 即時賠率 API 檢索")
     
-    col1, col2 = st.columns([2, 2])
+    col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         selected_date = st.date_input("選擇賽事日期", datetime.date.today())
     with col2:
         venue_choice = st.selectbox("賽馬場地", ["沙田 (ST)", "跑馬地 (HV)"])
+    with col3:
+        race_no = st.number_input("賽事場次", min_value=1, max_value=12, value=1, step=1)
 
-    date_str = selected_date.strftime("%Y%m%d")
+    date_str = selected_date.strftime("%Y-%m-%d")
+    venue_code = "ST" if "沙田" in venue_choice else "HV"
+
     st.markdown("---")
 
-    # 從本地 SQLite 讀取
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT race_idx, table_json FROM race_cache 
-        WHERE date_str = ? AND venue = ?
-    ''', (date_str, venue_choice))
-    rows = cursor.fetchall()
-    conn.close()
-
-    if rows:
-        st.success(f"成功從本地資料庫載入【{selected_date} ({venue_choice})】的賽事排位資料！")
-        race_options = [f"第 {row[0]+1} 場" for row in rows]
-        selected_race_idx = st.selectbox("選擇賽事場次", race_options)
-        
-        chosen_idx = int(selected_race_idx.replace("第 ", "").replace(" 場", "")) - 1
-        for row in rows:
-            if row[0] == chosen_idx:
-                target_df = pd.read_json(row[1], orient="split")
-                st.dataframe(target_df, use_container_width=True)
-                break
-    else:
-        st.warning("⚠️ 本地資料庫中尚無此日期的排位資料。")
-        st.info("💡 **操作指引**：請前往側邊欄的 **「📤 上傳最新排位數據」** 模組，上傳對應的 Excel 或 CSV 檔案，資料就會永久儲存在系統中！")
-
-# --- 模組二：上傳最新排位數據 ---
-elif page_mode == "📤 上傳最新排位數據":
-    st.subheader("📤 匯入賽事排位表")
-    st.caption("透過上傳 CSV 或 Excel 檔案，繞過伺服器防火牆限制，直接將真實排位資料寫入系統資料庫。")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        up_date = st.date_input("設定此數據的賽事日期", datetime.date.today(), key="up_date")
-    with col2:
-        up_venue = st.selectbox("設定賽馬場地", ["沙田 (ST)", "跑馬地 (HV)"], key="up_venue")
-
-    uploaded_file = st.file_uploader("上傳排位表檔案 (支援 .csv 或 .xlsx)", type=["csv", "xlsx"])
-
-    if uploaded_file is not None:
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
+    if st.button("🚀 立即向 HKJC API 提取數據"):
+        with st.spinner(f"正在連線至官方 API 獲取 {date_str} 第 {race_no} 場資料..."):
+            success, result = fetch_hkjc_json_odds(date_str, venue_code, race_no)
             
-            st.write("📋 預覽上傳的資料內容：")
-            st.dataframe(df.head(), use_container_width=True)
-
-            if st.button("確認並寫入本地資料庫"):
-                date_str = up_date.strftime("%Y%m%d")
-                conn = get_db_connection()
-                cursor = conn.cursor()
+            if success:
+                st.success("成功取得官方 API 即時數據！")
                 
-                df_json = df.to_json(orient="split")
-                cursor.execute('''
-                    INSERT OR REPLACE INTO race_cache (date_str, venue, race_idx, table_json)
-                    VALUES (?, ?, ?, ?)
-                ''', (date_str, up_venue, 0, df_json))
+                # 簡單展示回傳的 JSON 結構
+                st.json(result)
                 
-                conn.commit()
-                conn.close()
-                st.success("🎉 數據已成功寫入本地資料庫！現在您可以切換至「賽事排位表」模組隨時查看。")
-        except Exception as e:
-            st.error(f"解析檔案時發生錯誤: {e}")
+                # 如果回傳的資料包含馬匹賠率陣列，可以嘗試轉為 DataFrame 呈現
+                try:
+                    # 視官方 JSON 的實際結構進行解析呈現
+                    if isinstance(result, dict):
+                        st.write("📋 數據摘要解析：")
+                        st.write(result)
+                except Exception as parse_err:
+                    st.info(f"原始 JSON 已展開，結構解析提示: {parse_err}")
+            else:
+                st.warning(f"⚠️ 無法取得資料：{result}")
+                st.info("💡 **小叮嚀**：若當天並非賽馬日，或該場次尚未開售，官方 API 通常會返回空白或錯誤代碼。")
 
-# --- 模組三：私人晨操與走勢筆記 ---
+# --- 模組二：私人晨操與走勢筆記 ---
 elif page_mode == "🧠 私人晨操與走勢筆記":
-    st.subheader("🔥 專業操練與走勢分析筆記 (持久化資料庫)")
+    st.subheader("🔥 專業操練與走勢分析筆記")
     
     col1, col2 = st.columns(2)
     
@@ -174,7 +154,7 @@ elif page_mode == "🧠 私人晨操與走勢筆記":
         user_horse = st.text_input("馬匹名稱 / 馬號", placeholder="例如：金鑽貴人 (1)")
         user_note = st.text_area("記錄內容（如：工夫做足、走勢爽朗、檔位有利）", height=120)
         
-        if st.button("儲存至本地資料庫"):
+        if st.button("儲存筆記"):
             if user_horse and user_note:
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -183,12 +163,12 @@ elif page_mode == "🧠 私人晨操與走勢筆記":
                                (user_horse, user_note, current_time))
                 conn.commit()
                 conn.close()
-                st.success(f"成功將【{user_horse}】的筆記存入本地資料庫！")
+                st.success(f"成功為【{user_horse}】儲存筆記！")
             else:
-                st.warning("請完整填寫馬匹名稱與筆記內容。")
+                st.warning("請填寫馬匹名稱與內容。")
 
     with col2:
-        st.markdown("### 📂 已儲存的私人筆記列表")
+        st.markdown("### 📂 私人筆記庫")
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT horse_name, note, update_time FROM notes ORDER BY id DESC")
