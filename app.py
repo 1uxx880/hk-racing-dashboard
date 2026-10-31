@@ -1,103 +1,139 @@
-import requests
-import json
-import time
+import streamlit as st
+import pandas as pd
 import datetime
 import sqlite3
+import json
 
 # -----------------------------------------------------------------------------
-# 1. 資料庫連線與初始化
+# 0. 資料庫讀取邏輯
 # -----------------------------------------------------------------------------
-DB_NAME = "racing_local.db"
+def get_db_connection():
+    return sqlite3.connect("racing_local.db", check_same_thread=False)
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS race_odds_cache (
-            date_str TEXT,
-            venue TEXT,
-            race_no INTEGER,
-            odds_json TEXT,
-            update_time TEXT,
-            PRIMARY KEY (date_str, venue, race_no)
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            horse_name TEXT,
+            note TEXT,
+            update_time TEXT
         )
     ''')
     conn.commit()
     conn.close()
 
-# -----------------------------------------------------------------------------
-# 2. Telegram 發送通訊函式
-# -----------------------------------------------------------------------------
-def send_telegram_alert(bot_token, chat_id, message):
-    if not bot_token or not chat_id:
-        return
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"[Telegram 錯誤] {e}")
+init_db()
 
 # -----------------------------------------------------------------------------
-# 3. 核心 API 抓取與賠率監控邏輯
+# 1. 頁面基本配置
 # -----------------------------------------------------------------------------
-def fetch_hkjc_live_odds(date_str, venue, race_no):
-    """
-    直連 HKJC 官方公開 JSON API 獲取即時賠率 (WIN/PLA)
-    """
-    url = f"https://bet.hkjc.com/racing/getJSON.aspx?type=winplaodds&date={date_str}&venue={venue}&raceno={race_no}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://bet.hkjc.com/"
-    }
-    try:
-        res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            return res.json()
-    except Exception as e:
-        print(f"[抓取失敗] 場次 {race_no}: {e}")
-    return None
+st.set_page_config(
+    page_title="專業賽馬智能分析系統",
+    page_icon="🐎",
+    layout="wide"
+)
 
-def main_loop(bot_token=None, chat_id=None):
-    init_db()
-    print("🚀 HKJC 本地監控與資料同步服務啟動中...")
+st.title("🐎 專業賽馬智能分析與動態監控儀表板")
+st.caption("本地爬蟲引擎 + SQLite 即時同步 | 支援落飛監控與個人筆記庫")
+st.markdown("---")
+
+# -----------------------------------------------------------------------------
+# 2. 側邊欄控制面板
+# -----------------------------------------------------------------------------
+st.sidebar.header("⚙️ 系統控制面板")
+
+page_mode = st.sidebar.radio(
+    "功能模組",
+    ["📊 即時賠率與排位 (資料庫同步)", "📝 私人晨操與走勢筆記"]
+)
+
+# -----------------------------------------------------------------------------
+# 3. 主頁面邏輯
+# -----------------------------------------------------------------------------
+
+# --- 模組一：即時賠率與排位 ---
+if page_mode == "📊 即時賠率與排位 (資料庫同步)":
+    st.subheader("🏇 賽日即時賠率監控")
     
-    # 設定當天日期與賽場 (ST=沙田, HV=跑馬地)
-    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    venue = "ST"  
-    
-    last_odds_map = {}
+    col1, col2 = st.columns([2, 2])
+    with col1:
+        selected_date = st.date_input("選擇賽事日期", datetime.date.today())
+    with col2:
+        venue_choice = st.selectbox("賽馬場地", ["沙田 (ST)", "跑馬地 (HV)"])
 
-    while True:
-        print(f"\n[🔄 {datetime.datetime.now().strftime('%H:%M:%S')}] 正在掃描當日賽事即時賠率...")
+    date_str = selected_date.strftime("%Y-%m-%d")
+    venue_code = "ST" if "沙田" in venue_choice else "HV"
+
+    st.markdown("---")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            SELECT race_no, odds_json, update_time FROM race_odds_cache 
+            WHERE date_str = ? AND venue = ?
+            ORDER BY race_no ASC
+        ''', (date_str, venue_code))
+        rows = cursor.fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+
+    if rows:
+        st.success(f"成功連線本地數據庫！最後同步時間：{rows[0][2]}")
+        race_list = [f"第 {row[0]} 場" for row in rows]
+        selected_race = st.selectbox("選擇查看場次", race_list)
         
-        for race_no in range(1, 11): # 假設最多 10 場
-            odds_data = fetch_hkjc_live_odds(today_str, venue, race_no)
-            
-            if odds_data:
-                # 寫入 SQLite 資料庫
-                conn = sqlite3.connect(DB_NAME)
+        race_num = int(selected_race.replace("第 ", "").replace(" 場", ""))
+        
+        for row in rows:
+            if row[0] == race_num:
+                raw_json = json.loads(row[1])
+                st.markdown(f"### 📋 {selected_race} 即時賠率數據")
+                st.json(raw_json)
+                break
+    else:
+        st.warning("⚠️ 目前資料庫中暫無此日期的即時賠率數據。")
+        st.info("💡 **提示**：請確保您電腦中的 `scraper.py` 爬蟲腳本正在背景執行，它會自動將最新賠率寫入 `racing_local.db`。")
+
+# --- 模組二：私人晨操與走勢筆記 ---
+elif page_mode == "📝 私人晨操與走勢筆記":
+    st.subheader("🔥 專業操練與走勢分析筆記")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### ✍️ 新增觀察筆記")
+        user_horse = st.text_input("馬匹名稱 / 馬號", placeholder="例如：金鑽貴人 (1)")
+        user_note = st.text_area("記錄內容（如：工夫做足、走勢爽朗、檔位有利）", height=120)
+        
+        if st.button("儲存筆記"):
+            if user_horse and user_note:
+                conn = get_db_connection()
                 cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT OR REPLACE INTO race_odds_cache (date_str, venue, race_no, odds_json, update_time)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (today_str, venue, race_no, json.dumps(odds_data), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                cursor.execute("INSERT INTO notes (horse_name, note, update_time) VALUES (?, ?, ?)", 
+                               (user_horse, user_note, current_time))
                 conn.commit()
                 conn.close()
-                
-                # 簡單的賠率變動 (落飛) 檢測
-                # 比較上一輪賠率與最新賠率
-                # 若發現劇烈變動且有設定 Telegram 則推播警報
-                current_time = datetime.datetime.now().strftime("%H:%M:%S")
-                print(f"✅ 第 {race_no} 場賠率已成功更新並寫入資料庫 ({current_time})")
-            
-            time.sleep(1) # 每場間隔 1 秒，保護伺服器
+                st.success(f"成功為【{user_horse}】儲存筆記！")
+            else:
+                st.warning("請填寫馬匹名稱與內容。")
 
-        print("💤 等待 30 秒後進行下一輪即時監控...")
-        time.sleep(30)
+    with col2:
+        st.markdown("### 📂 私人筆記庫")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT horse_name, note, update_time FROM notes ORDER BY id DESC")
+        all_notes = cursor.fetchall()
+        conn.close()
 
-if __name__ == "__main__":
-    # 若有 Telegram Bot，可在此帶入 Token 與 Chat ID 進行測試
-    MY_BOT_TOKEN = "" 
-    MY_CHAT_ID = ""   
-    main_loop(MY_BOT_TOKEN, MY_CHAT_ID)
+        if all_notes:
+            for h_name, n_text, u_time in all_notes:
+                with st.expander(f"🐎 {h_name} ({u_time})"):
+                    st.write(n_text)
+        else:
+            st.info("目前尚無儲存的筆記。")
